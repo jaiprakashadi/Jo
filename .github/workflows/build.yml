@@ -1,0 +1,74 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project
+        run: unzip -oq jo-src.zip
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Download offline voice models
+        run: |
+          set -e
+          mkdir -p app/src/main/assets tmp
+          curl -L --fail -o tmp/stt.zip https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip
+          curl -L --fail -o tmp/spk.zip https://alphacephei.com/vosk/models/vosk-model-spk-0.4.zip
+          unzip -q tmp/stt.zip -d tmp/stt
+          unzip -q tmp/spk.zip -d tmp/spk
+          mv "$(ls -d tmp/stt/*/ | head -1)" app/src/main/assets/stt
+          mv "$(ls -d tmp/spk/*/ | head -1)" app/src/main/assets/spk
+          ls app/src/main/assets/stt app/src/main/assets/spk
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          gradle assembleDebug --console=plain 2>&1 | tee build.log
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          {
+            echo '### Build errors'
+            echo '```'
+            grep -E '^e: |error:|What went wrong' -A2 build.log | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jo-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Run unit tests (does not block the APK)
+        id: tests
+        if: success()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle testDebugUnitTest --console=plain 2>&1 | tee test.log
+          echo '### Unit tests passed' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show unit test problems
+        if: steps.tests.outcome == 'failure'
+        run: |
+          {
+            echo '### Unit test problems (APK is still fine)'
+            echo '```'
+            grep -E 'FAILED|AssertionError|expected|e: ' -A3 test.log | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
